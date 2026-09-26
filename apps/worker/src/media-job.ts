@@ -1,115 +1,18 @@
-import type { PrivacyRegion } from "@map/shared/contracts";
 import { config } from "./config";
 import { pool } from "./db";
-import { deleteObject, objectExists, readQuarantineObject, writeQuarantineObject, copyToPublic } from "./storage";
-import { scanForMalware } from "./clamav";
-import { processPrivacyImage } from "./privacy";
+import { deleteObject, objectExists } from "./storage";
+import { createMediaDeps, recoverStuckMedia } from "./pg-media";
+import { processMediaWith } from "./media/processor";
 
+export { recoverStuckMedia };
+
+/**
+ * Process a single media asset. Ports are created lazily per call so the
+ * orchestrator can also be exercised directly in fault-injection tests with
+ * deterministic in-memory fakes (see media/faults.test.ts).
+ */
 export async function processMediaJob(mediaId: string): Promise<void> {
-  const result = await pool.query<{
-    id: string;
-    privacy_status: string;
-    quarantine_object_key: string;
-    privacy_report: { manualRegions?: PrivacyRegion[] } | null;
-  }>(
-    `SELECT id, privacy_status, quarantine_object_key, privacy_report
-     FROM media_assets WHERE id = $1 AND deleted_at IS NULL`,
-    [mediaId]
-  );
-  const media = result.rows[0];
-  if (!media) throw new Error("Media record not found");
-  if (!["processing", "failed"].includes(media.privacy_status)) {
-    console.log(`skip media ${mediaId}: status=${media.privacy_status}`);
-    return;
-  }
-
-  const autoPublish = Boolean(config.PRIVACY_DETECTOR_URL);
-  const publicKey = `media/${mediaId}.webp`;
-  const publicThumbnailKey = `media/${mediaId}.thumb.webp`;
-
-  try {
-    await pool.query("UPDATE media_assets SET privacy_status = 'scanning', updated_at = now() WHERE id = $1", [mediaId]);
-    const source = await readQuarantineObject(media.quarantine_object_key);
-    await scanForMalware(source);
-
-    await pool.query("UPDATE media_assets SET privacy_status = 'processing', updated_at = now() WHERE id = $1", [mediaId]);
-    const manualRegions = media.privacy_report?.manualRegions ?? [];
-    const processed = await processPrivacyImage(source, manualRegions);
-
-    const processedKey = `processed/${mediaId}.webp`;
-    const thumbnailKey = `processed/${mediaId}.thumb.webp`;
-    await writeQuarantineObject(processedKey, processed.image, "image/webp");
-    await writeQuarantineObject(thumbnailKey, processed.thumbnail, "image/webp");
-
-    if (autoPublish) {
-      await copyToPublic(processedKey, publicKey);
-      await copyToPublic(thumbnailKey, publicThumbnailKey);
-    }
-
-    const report = {
-      manualRegions: processed.manualRegions,
-      detectorRegions: processed.detectorRegions,
-      detectorConfigured: autoPublish,
-      originalMetadataRemoved: true,
-      serverReencoded: true,
-      width: processed.width,
-      height: processed.height,
-      sha256: processed.sha256,
-      perceptualHash: processed.perceptualHash,
-      completedAt: new Date().toISOString()
-    };
-
-    await pool.query(
-      `UPDATE media_assets
-       SET privacy_status = $2,
-           processed_object_key = $3,
-           thumbnail_object_key = $4,
-           public_object_key = $5,
-           public_thumbnail_object_key = $12,
-           width = $6,
-           height = $7,
-           sha256 = $8,
-           perceptual_hash = $9,
-           privacy_report = $10::jsonb,
-           failure_code = NULL,
-           processed_at = now(),
-           delete_after = now() + ($11::text || ' hours')::interval,
-           updated_at = now()
-       WHERE id = $1`,
-      [
-        mediaId,
-        autoPublish ? "ready" : "manual_review",
-        processedKey,
-        thumbnailKey,
-        autoPublish ? publicKey : null,
-        processed.width,
-        processed.height,
-        processed.sha256,
-        processed.perceptualHash,
-        JSON.stringify(report),
-        String(config.ORIGINAL_RETENTION_HOURS),
-        autoPublish ? publicThumbnailKey : null
-      ]
-    );
-
-    console.log(`media ${mediaId} processed as ${autoPublish ? "ready" : "manual_review"}`);
-  } catch (error) {
-    const message = error instanceof Error ? error.message.slice(0, 500) : "Unknown media processing error";
-    await pool.query(
-      `UPDATE media_assets
-       SET privacy_status = 'failed', failure_code = $2,
-           delete_after = now() + interval '7 days', updated_at = now()
-       WHERE id = $1`,
-      [mediaId, message]
-    );
-    if (autoPublish) {
-      await Promise.allSettled([
-        deleteObject(config.S3_PUBLIC_BUCKET, publicKey),
-        deleteObject(config.S3_PUBLIC_BUCKET, publicThumbnailKey)
-      ]);
-    }
-    throw error;
-  }
+  await processMediaWith(createMediaDeps(), mediaId);
 }
 
 export async function cleanupOriginalMedia(): Promise<void> {
@@ -161,18 +64,6 @@ export async function markStaleFeatures(): Promise<void> {
      SET needs_review_at = COALESCE(needs_review_at, now()), updated_at = now()
      WHERE status = 'published' AND freshness_expires_at <= now() AND needs_review_at IS NULL`
   );
-}
-
-export async function recoverStuckMedia(): Promise<string[]> {
-  const result = await pool.query<{ id: string }>(
-    `UPDATE media_assets
-     SET privacy_status = 'processing', failure_code = 'Recovered after worker timeout', updated_at = now()
-     WHERE privacy_status IN ('scanning', 'processing')
-       AND updated_at < now() - interval '20 minutes'
-       AND deleted_at IS NULL
-     RETURNING id`
-  );
-  return result.rows.map((row) => row.id);
 }
 
 export async function cleanupDeletedMediaObjects(): Promise<void> {

@@ -22,7 +22,7 @@ export async function scanForMalware(buffer: Buffer): Promise<void> {
       }
     };
 
-    socket.setTimeout(30_000, () => finish(new Error("ClamAV scan timed out")));
+    socket.setTimeout(config.CLAMAV_TIMEOUT_MS, () => finish(new Error("ClamAV scan timed out")));
     socket.on("error", (error) => finish(error));
     socket.on("data", (chunk) => {
       chunks.push(chunk);

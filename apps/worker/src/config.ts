@@ -24,6 +24,7 @@ const envSchema = z.object({
   CLAMAV_ENABLED: z.string().default("true").transform((value) => value === "true"),
   CLAMAV_HOST: z.string().default("localhost"),
   CLAMAV_PORT: z.coerce.number().int().positive().default(3310),
+  CLAMAV_TIMEOUT_MS: z.coerce.number().int().positive().max(60_000).default(30_000),
   SMTP_HOST: z.string().default("localhost"),
   SMTP_PORT: z.coerce.number().int().positive().default(1025),
   SMTP_SECURE: z.string().default("false").transform((value) => value === "true"),

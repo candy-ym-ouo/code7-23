@@ -4,6 +4,7 @@ import { pool } from "./db";
 import { deleteObject, objectExists, readQuarantineObject, writeQuarantineObject, copyToPublic } from "./storage";
 import { scanForMalware } from "./clamav";
 import { processPrivacyImage } from "./privacy";
+import { recordMediaAudit } from "./audit";
 
 export async function processMediaJob(mediaId: string): Promise<void> {
   const result = await pool.query<{
@@ -93,6 +94,16 @@ export async function processMediaJob(mediaId: string): Promise<void> {
     );
 
     console.log(`media ${mediaId} processed as ${autoPublish ? "ready" : "manual_review"}`);
+    await recordMediaAudit({
+      action: autoPublish ? "media.processed" : "media.processed_manual_review",
+      mediaId,
+      metadata: {
+        detectorConfigured: autoPublish,
+        sha256: processed.sha256,
+        width: processed.width,
+        height: processed.height
+      }
+    });
   } catch (error) {
     const message = error instanceof Error ? error.message.slice(0, 500) : "Unknown media processing error";
     await pool.query(
@@ -102,6 +113,11 @@ export async function processMediaJob(mediaId: string): Promise<void> {
        WHERE id = $1`,
       [mediaId, message]
     );
+    await recordMediaAudit({
+      action: "media.processing_failed",
+      mediaId,
+      metadata: { failureCode: message }
+    });
     if (autoPublish) {
       await Promise.allSettled([
         deleteObject(config.S3_PUBLIC_BUCKET, publicKey),
@@ -172,6 +188,13 @@ export async function recoverStuckMedia(): Promise<string[]> {
        AND deleted_at IS NULL
      RETURNING id`
   );
+  for (const row of result.rows) {
+    await recordMediaAudit({
+      action: "media.recovered_after_timeout",
+      mediaId: row.id,
+      metadata: { recoveredFrom: "stuck" }
+    });
+  }
   return result.rows.map((row) => row.id);
 }
 

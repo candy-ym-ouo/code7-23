@@ -12,7 +12,8 @@
     "typecheck": "pnpm -r typecheck",
     "lint": "pnpm -r typecheck",
     "test": "pnpm -r test",
-    "verify": "pnpm lint && pnpm test && pnpm build",
+    "test:integration": "pnpm --filter @map/worker test:integration",
+    "verify": "pnpm lint && pnpm test && pnpm test:integration && pnpm build",
     "db:migrate": "pnpm --filter @map/db migrate",
     "db:seed": "pnpm --filter @map/db seed",
     "admin:create": "pnpm --filter @map/db admin:create"

@@ -75,6 +75,12 @@ pnpm build
 
 `pnpm verify` 串联类型检查、测试和生产构建。
 
+媒体故障注入集成测试（扫描超时、模糊失败、对象丢失、队列重放，含状态机/审计/最终一致性/步骤重放）需要本地真实的 PostgreSQL/PostGIS、Redis 和 S3 兼容存储：
+
+```bash
+pnpm test:integration
+```
+
 手工闭环验证建议：
 
 ```bash
